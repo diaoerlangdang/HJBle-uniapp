@@ -1,683 +1,356 @@
 <template>
-	<view>
-		<scroll-view class="data-list" scroll-y="true">
-			<view v-for="(item, index) in dataList" :key="index" class="data-item">
-
-				<view v-if="item.dataType == receiveType" class="receive">
-					<!--类型-->
-					<view class="receive-type">{{item.dataType}}</view>
-					<!--数据-->
-					<view class="receive-content">{{item.content}}</view>
-				</view>
-
-				<view v-else-if="item.dataType == sendType" class="send">
-					<!--类型-->
-					<view class="send-type">{{item.dataType}}</view>
-					<!--数据-->
-					<view class="send-content">{{item.content}}</view>
-				</view>
-
-				<view v-else class="other">
-					<!--数据-->
-					<view class="other-content">{{item.content}}</view>
-				</view>
-
-				<!--分割线-->
-				<view class="separator-line"></view>
-			</view>
-		</scroll-view>
-
-		<view class="tips">
-			<text class="tips_text">发送字节：{{sendByteLen}} Byte</text>
-			<text class="tips_text tips_speed">实时速率：{{receiveSpeed}} B/s</text>
-			<text class="tips_text tips_receivce_bytes">接收字节：{{receiveByteLen}} Byte</text>
-		</view>
-
-		<view class="title">
+	<view class="page-content">
+		<view class="title-box">
 			<text>日志：</text>
-			<button class="titleBtn" size="mini" @click="setConfig()">设置</button>
-			<button class="titleBtn" size="mini" @click="clearAllData()">清空</button>
+			<view class="btn-box">
+				<button size="mini" type="primary" plain="true" @click="setConfig">设置</button>
+				<button size="mini" type="primary" plain="true" @click="clearLog">清屏</button>
+			</view>
 		</view>
 
-		<view class="footer">
-			<input class="footer-input" v-model="inputData" :placeholder='inputPlaceHoler' />
-			<button class="sendBtn" @click="sendDataBtnClicked()" type="primary">发送</button>
+		<view class="log-box">
+			<view v-for="(item, index) in logList" :key="index" class="log-item" @click="selectLog(item)">
+				<view class="item-header">
+					<text v-if="item.dataType == DATA_TYPE_SEND" class="send-txt">发送：</text>
+					<text v-else-if="item.dataType == DATA_TYPE_RECEIVE" class="receive-txt">接收：</text>
+					<text v-else-if="item.dataType == DATA_TYPE_FAILED" class="failed-txt">失败：</text>
+					<text v-else class="other-txt">其他：</text>
+					<text>{{item.time}}</text>
+				</view>
+				<view class="item-body">
+					{{item.dataInfo}}
+				</view>
+			</view>
 		</view>
 
+		<view class="input-box">
+			<input class="input-wrap" v-model="inputData" :placeholder="inputPlaceHoler" confirm-type="send"
+				@confirm="sendData" />
+			<button size="mini" type="primary" @click="sendData">发送</button>
+		</view>
 	</view>
 </template>
 
-<script>
-	export default {
-		data() {
-			return {
-				device: null,
-				connected: false,
-				dataList: [{
-					dataType: "其他",
-					content: "正在连接。。。"
-				}],
-				receiveType: "接收",
-				sendType: "发送",
-				otherType: "其他",
-				inputData: "",
-				inputPlaceHoler: '请输入十六进制数',
-				dataCode: 'Hex', // 编码类型
+<script setup>
+	import * as bleUtil from '../../utils/bleUtil.js'
+	import * as bleConfig from '../../utils/bleConfig.js'
+	import * as util from '../../utils/util.js'
+	import * as storageUtils from '../../utils/storageUtils.js'
+	import {
+		ref,
+		getCurrentInstance,
+		computed
+	} from 'vue';
+	import {
+		onLoad,
+		onUnload,
+		onShow
+	} from '@dcloudio/uni-app'
 
-				sendByteLen: 0, // 已发送的字节数长度
-				receiveByteLen: 0, // 已接收的字节数长度
-				receiveSpeed: 0, // 实时速率，每秒接收字节数
-				recLenBySecond: 0, // 计算速率使用
 
-				maxGroupLen: 20, // 每包发送最大数据长度
+	// 其他类型
+	const DATA_TYPE_OTHER = 'other'
+	// 发送类型
+	const DATA_TYPE_SEND = 'send'
+	// 接收类型
+	const DATA_TYPE_RECEIVE = 'receive'
+	// 失败类型
+	const DATA_TYPE_FAILED = 'failed'
 
-				serviceId: "0000FFF0-0000-1000-8000-00805F9B34FB",
-				receiveId: "0000FFF1-0000-1000-8000-00805F9B34FB",
-				sendId: "0000FFF2-0000-1000-8000-00805F9B34FB",
-			}
-		},
-		onLoad(option) {
-			// console.log(option.query)
-			const eventChannel = this.getOpenerEventChannel()
-			// eventChannel.emit('acceptDataFromOpenedPage', {
-			// 	data: 'test'
-			// });
-			// eventChannel.emit('someEvent', {
-			// 	data: 'test'
-			// });
+	const currentDevice = ref(null)
 
-			var that = this;
-			// 监听acceptDataFromOpenerPage事件，获取上一页面通过eventChannel传送到当前页面的数据
-			eventChannel.on('acceptDataFromOpenerPage', function(data) {
-				that.device = data.device;
-				uni.setNavigationBarTitle({
-					title: that.device.name
-				});
-				
-				try{
-					// 连接设备并扫描服务
-					that.connectDeviceAndScanService(data.device);
-				}catch(e){
-					console.log('连接失败', e);
-				}
-				
+	// 当前设备每包最大的发送数据长度
+	const maxGroupBytesLen = ref(20)
+
+	const hasConfig = ref(false)
+
+	// 发送数据编码，hex ascii
+	const dataCode = ref('ASCII')
+	const communicationMode = ref('')
+
+	// 日志列表
+	const logList = ref([])
+
+	const inputData = ref('')
+
+	// 1. 获取页面实例（关键：替代 this）
+	const instance = getCurrentInstance();
+	// 2. 获取事件通道（等同于 Vue2 的 this.getOpenerEventChannel()）
+	const eventChannel = instance.proxy.getOpenerEventChannel();
+
+	const inputPlaceHoler = computed(() => {
+		return dataCode.value == 'HEX' ? "请输入十六进制数据" : "请输入字符数据"
+	})
+
+	onLoad(() => {
+
+		eventChannel.on('acceptDataFromOpenerPage', (data) => {
+			currentDevice.value = data.device;
+			maxGroupBytesLen.value = data.maxGroupBytesLen ?? 20
+			hasConfig.value = data.hasConfig
+			uni.setNavigationBarTitle({
+				title: currentDevice.value.name + '_' + communicationMode.value
 			});
 
-			// 蓝牙连接监控
-			uni.onBLEConnectionStateChange(function(res) {
-				// 该方法回调中可以用于处理连接意外断开等异常情况
-				console.log(`device ${res.deviceId} state has changed, connected: ${res.connected}`)
-				that.connected = res.connected;
-				if (!res.connected) {
-					that.addData({
-						dataType: "其他",
-						content: "连接已断开"
-					})
-				}
-			});
-		},
-		
-		onShow() {
-			this.inputData = '';
-			try {
-			    const value = uni.getStorageSync('dataCode');
-			    if (value) {
-			        this.inputPlaceHoler = (value == 'Hex') ? '请输入十六进制数' : '请输入字符数据';
-					this.dataCode = value;
-			    }
-			} catch (e) {
-			    // error
-				console.log('读取缓存失败', e);
-			}
-		},
 
-		onUnload() {
-			// 若设备连接，则断开
-			if (this.connected) {
-				uni.closeBLEConnection({
-					deviceId: this.device.deviceId,
-					success() {
-
-					}
-				});
-			}
-		},
-		methods: {
-
-			//添加数据
-			addData(data) {
-				this.dataList.push(data);
-			},
-
-			// 开始计算速率
-			startComputeSpeedTimer() {
-				var that = this
-				setInterval(function() {
-					that.receiveSpeed = that.recLenBySecond;
-					that.recLenBySecond = 0;
-				}, 1000) //循环时间 这里是1秒 
-			},
-			
-			// 连接设备并扫描服务
-			async connectDeviceAndScanService(device) {
-				
-				var result = false;
-				for (var i=0; i<5; i++) {
-					console.log('开始连接设备。。。');
-					result = await this.connectDevice(device);
-					if (!result) {
-						await this.sleep(100);
-					} else {
-						break;
-					}
-				}
-				if (result) {
-					this.addData({
-						dataType: "其他",
-						content: "连接成功，正在扫描服务。。。"
-					});
-				} else {
-					this.addData({
-						dataType: "其他",
-						content: "连接失败"
-					});
-					return ;
-				}
-				
-				var that = this;
-				// 此处有bug，延迟100ms在扫描服务可避免iOS上扫描特征失败的问题
-				setTimeout(function() {
-					that.getServiceAndCharacteristics(device);
-				}, 100);
-			},
-
-			// 连接设备
-			connectDevice(device) {
-				var that = this;
-
-				return new Promise(function(resolve, reject) {
-
-					uni.createBLEConnection({
-						deviceId: device.deviceId,
-						timeout: 10000, // 10s超时
-						success(res) {
-							resolve(true);
-						},
-						fail(res) {
-							console.log(res);
-							resolve(false);
-						}
-					})
-				});
-			},
-
-			// 获取服务
-			getServiceAndCharacteristics(device) {
-				var that = this;
-				uni.getBLEDeviceServices({
-					deviceId: device.deviceId,
-					success(res) {
-						// console.log('扫描服务', res);
-						// 此处有bug，返回的服务在android上为空数组，可再次调用，直到成功
-						if (res.services.length <= 0) {
-							that.getServiceAndCharacteristics(device);
-							return;
-						}
-						uni.getBLEDeviceCharacteristics({
-							deviceId: device.deviceId,
-							serviceId: that.serviceId,
-							success(res) {
-								console.log('扫描特征', res);
-								that.addData({
-									dataType: "其他",
-									content: '扫描成功，正在打开通知。。。'
-								});
-
-								// 打开通知
-								that.openNotify(device);
-
-							},
-							fail(res) {
-								console.log('获取特征失败', res);
-								that.addData({
-									dataType: "其他",
-									content: "扫描服务失败"
-								});
-							}
-						})
-
-					},
-					fail(res) {
-						console.log('获取服务失败', res);
-						that.addData({
-							dataType: "其他",
-							content: "扫描服务失败"
-						});
-					}
-				})
-			},
-
-			// 打开通知
-			openNotify(device) {
-				var that = this;
-				// 监听通知
-				uni.onBLECharacteristicValueChange(function(res) {
-					var content = '';
-					if (this.dataCode == 'Hex') {
-						content = ab2hex(res.value);
-					} else {
-						content = arrayBufferToString(res.value);
-					}
-					that.receiveByteLen += res.value.byteLength;
-					that.recLenBySecond += res.value.byteLength;
-
-					console.log('返回的数据：', content)
-					that.addData({
-						dataType: "接收",
-						content: content
-					})
-				});
-
-				// 打开通知
-				uni.notifyBLECharacteristicValueChange({
-					deviceId: device.deviceId,
-					serviceId: that.serviceId,
-					characteristicId: that.receiveId,
-					state: true,
-					success(res) {
-						that.addData({
-							dataType: "其他",
-							content: '打开通知成功'
-						})
-					},
-					fail(res) {
-						that.addData({
-							dataType: "其他",
-							content: "打开通知失败"
-						});
-					}
-				})
-			},
-
-			// 清空所有数据
-			clearAllData() {
-				this.dataList = [];
-				this.sendByteLen = 0;
-				this.receiveByteLen = 0;
-			},
-
-			//设置
-			setConfig() {
-				uni.navigateTo({
-					url:"../set-info/set-info"
-				})
-			},
-
-			// 点击发送按钮
-			sendDataBtnClicked() {
-				console.log(this.inputData);
-				var buffer;
-				if (this.dataCode == 'Hex') {
-					// 不是偶数
-					if (this.inputData.length % 2 != 0) {
-						toast("数据必须为2的倍数");
-						return;
-					}
-					
-					// 不是hex数据
-					if (!isHex(this.inputData)) {
-						toast("请输入Hex数据");
-						return;
-					}
-					
-					buffer = stringToHexBuffer(this.inputData);
-					
-				} else {
-					buffer = stringToArrayBuffer(this.inputData);
-				}
-				
-				this.sendData(buffer);
-			},
-
-			// 发送数据
-			async sendData(buffer) {
-				var count = parseInt((buffer.byteLength + this.maxGroupLen - 1) / this.maxGroupLen);
-				try {
-
-					for (var i = 0; i < count; i++) {
-						console.log('第' + i + '次', '共' + count + '次');
-						var tmpBuffer;
-						if ((i + 1) >= count) {
-							tmpBuffer = buffer.slice(i * this.maxGroupLen, buffer.byteLength);
-						} else {
-							tmpBuffer = buffer.slice(i * this.maxGroupLen, (i + 1) * this.maxGroupLen);
-						}
-
-						var result = await this.sendPacketData(tmpBuffer);
-						if (!result) {
-							this.addData({
-								dataType: "其他",
-								content: "发送数据失败"
-							});
-							return;
-						}
-						// 当不是最后一包时，延迟 200ms 增加android发送连续包时成功率
-						if ((i + 1) < count) {
-							await this.sleep(200);
-						}
-					}
-
-					this.sendByteLen += buffer.byteLength;
-					this.addData({
-						dataType: "发送",
-						content: this.inputData
-					});
-					this.inputData = '';
-
-				} catch (e) {
-					console.log(e);
-				}
-			},
-
-			// 延迟
-			sleep(ms) {
-				return new Promise(resolve =>
-					setTimeout(resolve, ms)
-				)
-			},
-
-			// 发送一包数据
-			sendPacketData(buffer) {
-				var that = this;
-
-				// //前20个字节
-				// var before = dataStr.substring(0, 40);
-				// var after = dataStr.substring(40);
-
-				// var buffer = this.stringToHexBuffer(before)
-				console.log('发送数据', ab2hex(buffer));
-				return new Promise(function(resolve, reject) {
-
-					uni.writeBLECharacteristicValue({
-						deviceId: that.device.deviceId,
-						serviceId: that.serviceId,
-						characteristicId: that.sendId,
-						value: buffer,
-						success: function(res) {
-							// success
-							console.log('write success:', res)
-							resolve(true)
-						},
-						fail: function(res) {
-							// fail
-							console.log('write failed:', res)
-							resolve(false)
-						},
-						complete: function(res) {
-							// complete
-							console.log('write', res)
-						}
-					})
-				})
-			},
-		},
-	}
-	
-	// 是否为hex值
-	function isHex(data) {
-		var regPos = /^([0-9a-fA-F])*$/;
-		return regPos.test(data);
-	}
-
-	// ArrayBuffer转16进度字符串示例
-	function ab2hex(buffer) {
-		const hexArr = Array.prototype.map.call(
-			new Uint8Array(buffer),
-			function(bit) {
-				return ('00' + bit.toString(16)).slice(-2)
-			}
-		)
-		return hexArr.join('')
-	}
-
-	//字符串转buffer 十六进制
-	function stringToHexBuffer(data) {
-		// var data = 'AA5504B10000B5'
-		var typedArray = new Uint8Array(data.match(/[\da-f]{2}/gi).map(function(h) {
-			return parseInt(h, 16)
-		}))
-
-		return typedArray.buffer;
-	}
-
-	//字符串转buffer 十六进制
-	function stringToUint8Array(data) {
-		// var data = 'AA5504B10000B5'
-		var typedArray = new Uint8Array(data.match(/[\da-f]{2}/gi).map(function(h) {
-			return parseInt(h, 16)
-		}))
-
-		return typedArray;
-	}
-	
-
-	// 字符串转byte数组
-	function stringToArrayBuffer(str) {
-		var bytes = new Array();
-		var len, c;
-		len = str.length;
-		for (var i = 0; i < len; i++) {
-			c = str.charCodeAt(i);
-			if (c >= 0x010000 && c <= 0x10FFFF) {
-				bytes.push(((c >> 18) & 0x07) | 0xF0);
-				bytes.push(((c >> 12) & 0x3F) | 0x80);
-				bytes.push(((c >> 6) & 0x3F) | 0x80);
-				bytes.push((c & 0x3F) | 0x80);
-			} else if (c >= 0x000800 && c <= 0x00FFFF) {
-				bytes.push(((c >> 12) & 0x0F) | 0xE0);
-				bytes.push(((c >> 6) & 0x3F) | 0x80);
-				bytes.push((c & 0x3F) | 0x80);
-			} else if (c >= 0x000080 && c <= 0x0007FF) {
-				bytes.push(((c >> 6) & 0x1F) | 0xC0);
-				bytes.push((c & 0x3F) | 0x80);
-			} else {
-				bytes.push(c & 0xFF);
-			}
-		}
-		var array = new Int8Array(bytes.length);
-		for (var i in bytes) {
-			array[i] = bytes[i];
-		}
-		return array.buffer;
-	}
-	
-	// byte数组转字符串
-	function arrayBufferToString(arr) {
-		if (typeof arr === 'string') {
-			return arr;
-		}
-		var dataview = new DataView(arr);
-		var ints = new Uint8Array(arr.byteLength);
-		for (var i = 0; i < ints.length; i++) {
-			ints[i] = dataview.getUint8(i);
-		}
-		arr = ints;
-		var str = '';
-		var _arr = arr;
-		for (var i = 0; i < _arr.length; i++) {
-			var one = _arr[i].toString(2),
-				v = one.match(/^1+?(?=0)/);
-			if (v && one.length == 8) {
-				var bytesLength = v[0].length;
-				var store = _arr[i].toString(2).slice(7 - bytesLength);
-				for (var st = 1; st < bytesLength; st++) {
-					store += _arr[st + i].toString(2).slice(2);
-				}
-				str += String.fromCharCode(parseInt(store, 2));
-				i += bytesLength - 1;
-			} else {
-				str += String.fromCharCode(_arr[i]);
-			}
-		}
-		return str;
-	}
-
-	/**
-	 * 弹出框封装
-	 */
-	function toast(content, showCancel = false) {
-		uni.showModal({
-			title: '提示',
-			content,
-			showCancel
 		});
+
+		listenNotifications()
+	})
+
+	onUnload(() => {
+		if (currentDevice.value) {
+			uni.closeBLEConnection({
+				deviceId: currentDevice.value.deviceId,
+				success() {
+
+				}
+			});
+		}
+
+	})
+
+	onShow(() => {
+		dataCode.value = storageUtils.getDataCode()
+		communicationMode.value = storageUtils.getcommunicationMode()
+		if (currentDevice.value) {
+			uni.setNavigationBarTitle({
+				title: currentDevice.value.name + '_' + communicationMode.value
+			});
+		}
+	})
+
+	//设置
+	function setConfig() {
+		uni.navigateTo({
+			url: `../set-info/set-info?hasConfig=${hasConfig.value}`
+		})
+	}
+
+	function clearLog() {
+		logList.value = []
+	}
+
+	function selectLog(item) {
+		uni.setClipboardData({
+			data: item.dataInfo,
+			success() {
+				uni.showToast({
+					title: "复制成功"
+				})
+			}
+		})
+	}
+
+	function sendData() {
+		if (dataCode.value == 'HEX') {
+			sendHexData()
+		} else {
+			sendUtf8Data()
+		}
+	}
+
+	function sendUtf8Data() {
+		if (inputData.value.length == 0) {
+			uni.showToast({
+				icon: 'none',
+				title: "请输入数据"
+			})
+			return
+		}
+
+		const strData = inputData.value
+
+		const bufferData = bleUtil.stringToArrayBuffer(strData)
+
+		logList.value.push({
+			dataType: DATA_TYPE_SEND,
+			time: util.formatTime(),
+			dataInfo: strData,
+		})
+
+		const serviceUUID = communicationMode.value == '数据模式' ? bleConfig.SERVICE_UUID : bleConfig.CONFIG_SERVICE_UUID
+		const characteristicUUID = communicationMode.value == '数据模式' ? bleConfig.WRITE_CHARACTERISTIC_UUID : bleConfig
+			.CONFIG_WRITE_CHARACTERISTIC_UUID
+
+		bleUtil.writeDataAutoGroup(currentDevice.value.deviceId, serviceUUID, characteristicUUID,
+			bufferData, maxGroupBytesLen.value).then((res) => {
+
+			if (!res) {
+				logList.value.push({
+					dataType: DATA_TYPE_OTHER,
+					time: util.formatTime(),
+					dataInfo: "发送失败",
+				})
+			} else {
+				inputData.value = ""
+			}
+		})
+	}
+
+	function sendHexData() {
+		if (inputData.value.length % 2 != 0 || inputData.value.length == 0) {
+			uni.showToast({
+				icon: 'none',
+				title: "请输入偶数长度"
+			})
+			return
+		}
+		if (!bleUtil.isHexString(inputData.value)) {
+			uni.showToast({
+				icon: 'none',
+				title: "请输入十六进制数据"
+			})
+			return
+		}
+		const strData = inputData.value
+
+		const bufferData = bleUtil.hex2ab(strData)
+
+		logList.value.push({
+			dataType: DATA_TYPE_SEND,
+			time: util.formatTime(),
+			dataInfo: strData,
+		})
+		const serviceUUID = communicationMode.value == '数据模式' ? bleConfig.SERVICE_UUID : bleConfig.CONFIG_SERVICE_UUID
+		const characteristicUUID = communicationMode.value == '数据模式' ? bleConfig.WRITE_CHARACTERISTIC_UUID : bleConfig
+			.CONFIG_WRITE_CHARACTERISTIC_UUID
+
+		bleUtil.writeDataAutoGroup(currentDevice.value.deviceId, serviceUUID, characteristicUUID,
+			bufferData, maxGroupBytesLen.value).then((res) => {
+
+			if (!res) {
+				logList.value.push({
+					dataType: DATA_TYPE_OTHER,
+					time: util.formatTime(),
+					dataInfo: "发送失败",
+				})
+			} else {
+				inputData.value = ""
+			}
+		})
+	}
+
+	// 监听控制点通知
+	function listenNotifications() {
+		uni.onBLEConnectionStateChange(function(res) {
+			logList.value.push({
+				dataType: DATA_TYPE_OTHER,
+				time: util.formatTime(),
+				dataInfo: '蓝牙已断开...',
+			})
+
+		})
+		uni.onBLECharacteristicValueChange((res) => {
+			if (dataCode.value == 'HEX') {
+				const hexStr = bleUtil.ab2hex(res.value)
+				console.log(`接收数据: ${hexStr}`)
+
+				logList.value.push({
+					dataType: DATA_TYPE_RECEIVE,
+					time: util.formatTime(),
+					dataInfo: hexStr,
+				})
+			} else {
+				const str = bleUtil.arrayBufferToString(res.value)
+				console.log(`接收数据: ${str}`)
+
+				logList.value.push({
+					dataType: DATA_TYPE_RECEIVE,
+					time: util.formatTime(),
+					dataInfo: str,
+				})
+			}
+
+
+		})
 	}
 </script>
 
-<style>
-	.tips {
+<style lang="scss" scoped>
+	.page-content {
+		width: 100%;
+		height: 100%;
 		display: flex;
-		flex-direction: row;
-		flex-wrap: wrap;
+		flex-direction: column;
+		padding: 16rpx;
+		box-sizing: border-box;
+		background-color: #f0f0f0;
+	}
+
+	.title-box {
+		color: #333;
+		font-size: 15px;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding-bottom: 28rpx;
+	}
+
+	.btn-box {
+		display: flex;
+		gap: 14rpx;
+		align-items: center;
+	}
+
+	.log-box {
+		flex: 1;
 		width: 100%;
-		margin: 0 auto;
-		position: fixed;
-		padding-left: 10px;
-		padding-bottom: 3px;
-		top: 0rpx;
-		padding-right: 10px;
-		background: #fff;
+		height: 0;
+		overflow-y: auto;
+		overflow-x: hidden;
+
+		.log-item {
+			box-sizing: border-box;
+			border-bottom: 1px solid #999;
+			padding: 14rpx 10rpx;
+			font-size: 14px;
+
+			.item-header {
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+
+				.send-txt {
+					color: blue;
+				}
+
+				.receive-txt {
+					color: #f58220;
+				}
+
+				.failed-txt {
+					color: red;
+				}
+
+				.other-txt {
+					color: #333;
+				}
+			}
+
+			.item-body {
+				box-sizing: border-box;
+				padding: 16rpx 0 0 30rpx;
+				white-space: normal;
+				word-wrap: break-word; // 允许长单词/字符串换行
+				word-break: break-all; // 强制在任意字符处换行（适配连续无分隔文本）
+
+			}
+		}
 	}
 
-	.tips_text {
-		font-size: 9px;
-	}
+	.input-box {
+		display: flex;
+		gap: 10rpx;
 
-	.tips_receivce_bytes {
-		float: right;
-		margin-right: 3%;
-		padding-right: 10px;
-	}
-
-	.tips_speed {
-		margin: 0 auto;
-	}
-
-	.title {
-		padding-left: 10px;
-		padding-right: 10px;
-		position: fixed;
-		width: 100%;
-		top: 0rpx;
-		margin-top: 15px;
-		overflow: hidden;
-		background: #fff;
-	}
-
-	.titleBtn {
-		height: 30px;
-		display: block;
-		margin-right: 3%;
-		float: right;
-	}
-
-	.data-list {
-		padding-bottom: 60px;
-		padding-top: 35px;
-	}
-
-	.footer {
-		background: #fff;
-		padding-left: 1%;
-		padding-right: 1%;
-		padding-bottom: 10px;
-		position: fixed;
-		width: 100%;
-		bottom: 0rpx;
-		overflow: hidden;
-	}
-
-	.footer-input {
-		border: 1px solid gray;
-		display: inline-block;
-		padding-left: 10px;
-		padding-right: 10px;
-		border-radius: 5px;
-		height: 40px;
-		width: 70%;
-	}
-
-	.sendBtn {
-		height: 40px;
-		display: block;
-		margin-right: 3%;
-		float: right;
-	}
-
-	/*列表单元主体*/
-	.receive {
-		padding-top: 5px;
-		padding-bottom: 5px;
-		padding-left: 5px;
-		padding-right: 5px;
-	}
-
-	.send {
-		padding-top: 5px;
-		padding-bottom: 5px;
-		padding-left: 5px;
-		padding-right: 5px;
-	}
-
-	.other {
-		padding-top: 5px;
-		padding-bottom: 5px;
-		padding-left: 5px;
-		padding-right: 5px;
-	}
-
-	.receive-type {
-		color: red;
-		font-size: 14px;
-	}
-
-	.receive-content {
-		color: red;
-		font-size: 14px;
-		margin-top: 5px;
-		margin-left: 10px;
-		/* 自动换行 */
-		word-break: break-all;
-	}
-
-	.send-type {
-		color: blue;
-		font-size: 14px;
-	}
-
-	.send-content {
-		color: blue;
-		font-size: 14px;
-		margin-top: 5px;
-		margin-left: 10px;
-		/* 自动换行 */
-		word-break: break-all;
-	}
-
-	.other-content {
-		color: black;
-		font-size: 14px;
-		margin-top: 5px;
-		margin-left: 10px;
-		/* 自动换行 */
-		word-break: break-all;
-	}
-
-	/*列表分割线*/
-	.separator-line {
-		height: 1px;
-		background: lightgray;
-		margin-left: 5px;
-		margin-right: 5px;
+		.input-wrap {
+			flex: 1;
+			border: 1px solid gray;
+			display: inline-block;
+			padding-left: 10px;
+			padding-right: 10px;
+			border-radius: 5px;
+			height: 40px;
+		}
 	}
 </style>
