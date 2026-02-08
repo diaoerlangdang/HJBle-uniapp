@@ -290,6 +290,7 @@
 	async function connect(device) {
 		let err = null
 		const deviceId = device.deviceId
+		hasConfig.value = false
 
 		// 连接5次
 		for (let index = 0; index < 5; index++) {
@@ -329,6 +330,10 @@
 		
 		// 是否支持配置模式
 		hasConfig.value = await openConfigNotify(deviceId, services)
+		// 延迟500ms 避免下次打开通知失败
+		if (hasConfig.value) {
+			await bleUtil.timeout(500)
+		}
 
 		// 查找服务
 		const dataService = services.find(
